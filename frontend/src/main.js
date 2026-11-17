@@ -157,7 +157,7 @@ async function run() {
           thinkEl = null;
           setPulse("writing the brief", true);
           const secs = Math.round((Date.now() - started) / 1000);
-          renderBrief(ev, { steps: stepCount, toolCalls, secs });
+          renderBrief(ev, { steps: stepCount, toolCalls: toolCount, secs });
           done = true;
         }
         lastKind = ev.type;
