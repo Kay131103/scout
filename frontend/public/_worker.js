@@ -63,7 +63,7 @@ async function runAgent(env, task, send) {
   for (let step = 1; step <= MAX_STEPS; step++) {
     send("thought", { text: `step ${step}: thinking…` });
     const res = await env.AI.run(MODEL, { messages, max_tokens: 320, temperature: 0.2 });
-    const raw = typeof res.response === "string" ? res.response : JSON.stringify(res);
+    const raw = res.result?.response ?? res.response ?? JSON.stringify(res);
     const parsed = extractJson(raw);
 
     if (!parsed || !parsed.action) {
@@ -72,7 +72,7 @@ async function runAgent(env, task, send) {
         role: "user",
         content: `invalid format. reply with ONLY: {"thought":"...","action":{"tool":"search","args":{"query":"..."}}}`,
       });
-      send("repair", { text: "the model broke the JSON protocol — sending a repair prompt" });
+      send("repair", { text: `protocol broken — model said: ${raw.slice(0, 120)}` });
       continue;
     }
 
