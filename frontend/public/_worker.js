@@ -3,7 +3,7 @@
    Every other request is served from the static assets (the frontend). */
 
 const MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
-const MAX_STEPS = 7;
+const MAX_STEPS = 9;
 
 const SYS = `You are Scout, a careful research agent. Complete the user's TASK using tools.
 
@@ -89,14 +89,14 @@ async function runAgent(env, task, send) {
       send("observation", { text: r.text, items: r.items });
       for (const it of r.items)
         sources.set(it.title, `https://en.wikipedia.org/wiki/${it.title.replaceAll(" ", "_")}`);
-      messages.push({ role: "user", content: `OBSERVATION (search "${q}"):\n${r.text}` });
+      messages.push({ role: "user", content: `OBSERVATION (search "${q}", steps used ${step}/${MAX_STEPS}):\n${r.text}\n\n(when you can answer the TASK, call finish — do not over-research)` });
     } else if (tool === "read") {
       const title = String(args?.title || "").slice(0, 150);
       send("action", { tool: "read", args: { title } });
       const r = await wikiRead(title);
       send("observation", { text: r.text });
       if (r.ok) sources.set(r.title, `https://en.wikipedia.org/wiki/${r.title.replaceAll(" ", "_")}`);
-      messages.push({ role: "user", content: `OBSERVATION (read "${title}"):\n${r.text}` });
+      messages.push({ role: "user", content: `OBSERVATION (read "${title}", steps used ${step}/${MAX_STEPS}):\n${r.text}\n\n(when you can answer the TASK, call finish — do not over-research)` });
     } else if (tool === "finish") {
       send("action", { tool: "finish", args: {} });
       send("final", {
@@ -109,9 +109,22 @@ async function runAgent(env, task, send) {
       messages.push({ role: "user", content: `OBSERVATION: unknown tool "${tool}". use search, read or finish.` });
     }
   }
+  // step limit reached — one forced synthesis so the user always gets a brief
+  send("status", { text: "step limit reached — synthesizing the brief from everything gathered" });
+  messages.push({
+    role: "user",
+    content: `STEP LIMIT. From the observations above, write the final brief answering the TASK now. Respond ONLY with JSON: {"action":{"tool":"finish","args":{"answer":"<the brief, citing what the observations showed>","sources":["<page titles>"]}}}`,
+  });
+  const res = await env.AI.run(MODEL, { messages, max_tokens: 700, temperature: 0.2 });
+  let raw = res?.result?.response ?? res?.response ?? res;
+  if (typeof raw !== "string") raw = JSON.stringify(raw);
+  const parsed = extractJson(raw);
+  const answer = parsed?.action?.args?.answer || raw.slice(0, 2500);
+  send("action", { tool: "finish", args: {} });
   send("final", {
-    text: "the agent hit its step limit before finishing. try a narrower task.",
+    text: answer,
     sources: [...sources.entries()].map(([title, url]) => ({ title, url })),
+    note: "synthesized at the step limit",
   });
 }
 
