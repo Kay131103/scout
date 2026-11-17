@@ -1,6 +1,6 @@
-/* Scout — a research agent.
-   The loop: think (Workers AI) → act (a tool) → observe (tool result) → repeat.
-   Tools hit Wikipedia's public APIs. Everything streams to the browser as SSE. */
+/* Scout — advanced-mode Pages Worker.
+   POST /api/run runs the agent loop (Cloudflare Workers AI, free tier).
+   Every other request is served from the static assets (the frontend). */
 
 const MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
 const MAX_STEPS = 7;
@@ -19,37 +19,36 @@ Tools:
 Rules: exactly one action per response. search first, then read the best page.
 finish ONLY when the answer fully covers the task. Thoughts under 30 words.`;
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
 const jsonResp = (obj, status = 200) =>
-  new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json", ...CORS } });
+  new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
 
-export async function onRequestPost(context) {
-  const { request, env } = context;
-  const { task } = await request.json().catch(() => ({ task: "" }));
-  if (!task || typeof task !== "string" || task.length > 500)
-    return jsonResp({ error: "provide a task (max 500 chars)" }, 400);
-  const stream = new ReadableStream({
-    async start(controller) {
-      const enc = new TextEncoder();
-      const send = (type, data) =>
-        controller.enqueue(enc.encode(`data: ${JSON.stringify({ type, ...data })}\n\n`));
-      try {
-        await runAgent(env, task.slice(0, 500), send);
-      } catch (err) {
-        send("error", { text: `agent error: ${String(err).slice(0, 200)}` });
-      }
-      controller.close();
-    },
-  });
-  return new Response(stream, {
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
-  });
-}
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/run" && request.method === "POST") {
+      const { task } = await request.json().catch(() => ({ task: "" }));
+      if (!task || typeof task !== "string" || task.length > 500)
+        return jsonResp({ error: "provide a task (max 500 chars)" }, 400);
+      const stream = new ReadableStream({
+        async start(controller) {
+          const enc = new TextEncoder();
+          const send = (type, data) =>
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({ type, ...data })}\n\n`));
+          try {
+            await runAgent(env, task.slice(0, 500), send);
+          } catch (err) {
+            send("error", { text: `agent error: ${String(err).slice(0, 200)}` });
+          }
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+      });
+    }
+    return env.ASSETS.fetch(request);
+  },
+};
 
 /* ---------------- the agent loop ---------------- */
 
@@ -68,13 +67,12 @@ async function runAgent(env, task, send) {
     const parsed = extractJson(raw);
 
     if (!parsed || !parsed.action) {
-      // the model ignored the protocol — one repair pass
       messages.push({ role: "assistant", content: raw.slice(0, 400) });
       messages.push({
         role: "user",
         content: `invalid format. reply with ONLY: {"thought":"...","action":{"tool":"search","args":{"query":"..."}}}`,
       });
-      send("repair", { text: "the model broke the protocol — sending a repair prompt" });
+      send("repair", { text: "the model broke the JSON protocol — sending a repair prompt" });
       continue;
     }
 
@@ -88,7 +86,8 @@ async function runAgent(env, task, send) {
       send("action", { tool: "search", args: { query: q } });
       const r = await wikiSearch(q);
       send("observation", { text: r.text, items: r.items });
-      for (const it of r.items) sources.set(it.title, `https://en.wikipedia.org/wiki/${it.title.replaceAll(" ", "_")}`);
+      for (const it of r.items)
+        sources.set(it.title, `https://en.wikipedia.org/wiki/${it.title.replaceAll(" ", "_")}`);
       messages.push({ role: "user", content: `OBSERVATION (search "${q}"):\n${r.text}` });
     } else if (tool === "read") {
       const title = String(args?.title || "").slice(0, 150);
@@ -125,7 +124,6 @@ function extractJson(text) {
     if (!c) continue;
     const start = c.indexOf("{");
     if (start < 0) continue;
-    // walk to the matching brace
     let depth = 0;
     for (let i = start; i < c.length; i++) {
       if (c[i] === "{") depth++;
