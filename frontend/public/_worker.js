@@ -63,7 +63,8 @@ async function runAgent(env, task, send) {
   for (let step = 1; step <= MAX_STEPS; step++) {
     send("thought", { text: `step ${step}: thinking…` });
     const res = await env.AI.run(MODEL, { messages, max_tokens: 320, temperature: 0.2 });
-    const raw = res.result?.response ?? res.response ?? JSON.stringify(res);
+    let raw = res?.result?.response ?? res?.response ?? res;
+    if (typeof raw !== "string") raw = JSON.stringify(raw);
     const parsed = extractJson(raw);
 
     if (!parsed || !parsed.action) {
