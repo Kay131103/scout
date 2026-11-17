@@ -1,46 +1,102 @@
 const $ = (sel) => document.querySelector(sel);
 
-function card(kind, text) {
-  const el = document.createElement("div");
-  el.className = "card " + kind;
-  const labels = { thought: "thought", action: "action", obs: "observation", status: "status", repair: "protocol repair", error: "error", final: "final brief" };
-  el.innerHTML = `<div class="kind">${labels[kind] || kind}</div><div class="body">${escapeHtml(text)}</div>`;
-  $("#trace").appendChild(el);
-  $("#trace").scrollTop = $("#trace").scrollHeight;
-  return el;
-}
-
 function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function renderBrief(brief) {
-  const el = document.createElement("div");
-  el.className = "panel brief";
-  const srcs = (brief.sources || [])
-    .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer">▸ ${escapeHtml(s.title)}</a>`)
-    .join("");
-  el.innerHTML = `<h4>the brief</h4><div class="body">${escapeHtml(brief.text)}</div>
-    ${srcs ? `<div class="srcs"><div class="kind" style="font:700 10.5px 'JetBrains Mono';color:var(--faint);margin-bottom:6px">SOURCES</div>${srcs}</div>` : ""}`;
-  $("#final").appendChild(el);
-  el.scrollIntoView({ behavior: "smooth", block: "start" });
+let stepCount = 0;
+let toolCount = 0;
+let running = false;
+
+function setPulse(text, live) {
+  const p = $("#pulse");
+  p.querySelector("span").textContent = text;
+  p.classList.toggle("live", !!live);
 }
 
-let running = false;
+function addStep(kind, bodyHtml) {
+  stepCount++;
+  const el = document.createElement("div");
+  el.className = "step " + kind;
+  el.innerHTML = `<div class="node"></div><div class="card ${kind}"><div class="kind">${kind === "obs" ? "observation" : kind}</div><div class="body"></div></div>`;
+  const body = el.querySelector(".body");
+  body.innerHTML = bodyHtml;
+  $("#trace").appendChild(el);
+  el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  return el;
+}
+
+function addThought(text, thinking = false) {
+  const el = addStep("thought", escapeHtml(text) + (thinking ? `<div class="typing"><i></i><i></i><i></i></div>` : ""));
+  return el;
+}
+
+function addAction(tool, args) {
+  toolCount++;
+  const argsStr = args && Object.keys(args).length ? escapeHtml(JSON.stringify(args)) : "";
+  addStep("action", `${escapeHtml(tool)}(${argsStr})`);
+}
+
+function addObservation(text) {
+  const el = addStep("obs", "");
+  const body = el.querySelector(".body");
+  if (text.length > 260) {
+    body.classList.add("clipped");
+    body.textContent = text.slice(0, 260) + " …";
+    const more = document.createElement("span");
+    more.className = "more";
+    more.textContent = "show full observation";
+    more.addEventListener("click", () => {
+      const open = body.classList.toggle("clipped");
+      body.textContent = open ? text.slice(0, 260) + " …" : text;
+      more.textContent = open ? "show full observation" : "collapse";
+    });
+    body.after(more);
+  } else {
+    body.textContent = text;
+  }
+}
+
+function renderBrief(brief, stats) {
+  const el = document.createElement("div");
+  el.className = "brief-wrap";
+  const srcs = (brief.sources || [])
+    .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title)}</a>`)
+    .join("");
+  el.innerHTML = `<div class="brief">
+    <div class="tag">Scout's brief</div>
+    <div class="body">${escapeHtml(brief.text)}</div>
+    ${srcs ? `<div class="srcs"><div class="label">sources — wikipedia</div>${srcs}</div>` : ""}
+  </div>`;
+  $("#final").appendChild(el);
+  el.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  const statsEl = document.createElement("div");
+  statsEl.className = "panel stats-panel";
+  statsEl.style.marginTop = "14px";
+  statsEl.innerHTML = `<div class="stats">
+    <div class="stat"><div class="v">${stats.steps}</div><div class="l">thoughts</div></div>
+    <div class="stat"><div class="v">${stats.toolCalls}</div><div class="l">tool calls</div></div>
+    <div class="stat"><div class="v">${(brief.sources || []).length}</div><div class="l">sources</div></div>
+    <div class="stat"><div class="v">${stats.secs}s</div><div class="l">duration</div></div>
+  </div>`;
+  $("#final").appendChild(statsEl);
+}
 
 async function run() {
   if (running) return;
   const task = $("#task").value.trim();
   if (!task) { $("#task").focus(); return; }
   running = true;
+  stepCount = 0; toolCount = 0;
   $("#runBtn").disabled = true;
-  $("#runBtn").textContent = "scout is working…";
+  $("#runBtn").textContent = "Scout is working…";
   $("#trace").innerHTML = "";
   $("#final").innerHTML = "";
+  setPulse("agent running", true);
+  addStep("status", "assembling the context — model loading on the edge");
 
   const started = Date.now();
-  let steps = 0;
-  let toolCalls = 0;
   let lastKind = "";
 
   try {
@@ -55,6 +111,7 @@ async function run() {
     const dec = new TextDecoder();
     let buf = "";
     let done = false;
+    let thinkEl = null;
 
     while (!done) {
       const { value, done: rd } = await reader.read();
@@ -69,41 +126,50 @@ async function run() {
         try { ev = JSON.parse(chunk.slice(6)); } catch { continue; }
 
         if (ev.type === "thought") {
-          if (lastKind === "status") { /* keep the thinking line compact */ }
-          card("thought", ev.text);
-          steps++;
+          if (thinkEl && lastKind === "thought") {
+            // the "step n: thinking…" line updates into the real thought
+            thinkEl.querySelector(".body").innerHTML = escapeHtml(ev.text);
+            thinkEl = null;
+          } else {
+            thinkEl = addThought(ev.text);
+          }
+          stepCount++;
         } else if (ev.type === "action") {
-          card("action", `${ev.tool}(${JSON.stringify(ev.args || {})})`);
-          toolCalls++;
+          thinkEl = null;
+          addAction(ev.tool, ev.args);
+          toolCount++;
+          setPulse(`${ev.tool}…`, true);
         } else if (ev.type === "observation") {
-          card("obs", ev.text.slice(0, 600));
+          thinkEl = null;
+          addObservation(ev.text.slice(0, 1200));
+          setPulse("reading the observation", true);
         } else if (ev.type === "status") {
-          card("status", ev.text);
+          addStep("status", ev.text);
+          setPulse(ev.text.slice(0, 40), true);
         } else if (ev.type === "repair") {
-          card("repair", ev.text);
+          thinkEl = null;
+          addStep("error", ev.text);
         } else if (ev.type === "error") {
-          card("error", ev.text);
+          thinkEl = null;
+          addStep("error", ev.text);
           done = true;
         } else if (ev.type === "final") {
-          card("final", "done — writing the brief");
-          renderBrief(ev);
+          thinkEl = null;
+          setPulse("writing the brief", true);
+          const secs = Math.round((Date.now() - started) / 1000);
+          renderBrief(ev, { steps: stepCount, toolCalls, secs });
           done = true;
         }
         lastKind = ev.type;
       }
     }
-
-    const secs = Math.round((Date.now() - started) / 1000);
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `${steps} thoughts · ${toolCalls} tool calls · ${secs}s · inference on cloudflare's free edge`;
-    $("#final").appendChild(meta);
   } catch (err) {
-    card("error", `could not reach the agent: ${err.message}`);
+    addStep("error", `could not reach the agent: ${escapeHtml(err.message)}`);
   }
   running = false;
+  setPulse("idle — brief the agent again", false);
   $("#runBtn").disabled = false;
-  $("#runBtn").textContent = "⌕ send scout";
+  $("#runBtn").textContent = "Run scout";
 }
 
 document.querySelectorAll(".ex").forEach((el) =>
