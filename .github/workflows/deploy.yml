@@ -20,6 +20,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: verify worker file
+        run: ls -la dist/ | grep _worker
       - name: deploy to cloudflare pages
         run: npx wrangler pages deploy dist --project-name=scout --branch main --commit-dirty=true
         env:
